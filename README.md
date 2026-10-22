@@ -20,7 +20,7 @@ TideCloak Challenge 2 · RMIT GenAI & Cybersecurity Hackathon 2026
 | Roles | `tenant`, `lead_tenant`, `landlord` are Realm/Client Roles in the token. Claims are landlord-only, decisions are tenant-only, deposits are tenant-only. Every `/api/vault/*` mutation re-checks the role server-side. |
 | No unilateral money | A release needs one landlord claim + two of three tenant approvals. Lead-tenant withdrawal and landlord force-deduct both return a signed `403` policy receipt. No account holds a move-funds scope. |
 | Approval signatures | Each browser generates a non-extractable ECDSA P-256 key. Its SPKI public key is bound to the session; every approval is signed in the browser and verified by the server before it counts. |
-| Field encryption | Refund IBAN, account name, national/student ID and the landlord's confidential claim note are encrypted with AES-256-GCM **before** upload. The server validates and stores only `ENC_TIDE_v1:` ciphertext. |
+| Field encryption | Refund IBAN, account name, national/student ID and the landlord's confidential claim note are encrypted with AES-256-GCM **before** upload. The server validates and stores only the ciphertext envelope (rendered as `ENC_TIDE_v1:` in the inspector). |
 | Persistence | The vault, wallets, claims, approvals, protected records and revocation list live in `data/vault-db.json`, reachable only through the protected API routes. |
 | Transparency | The header opens a raw JWT inspector (header + server-verified payload). The Data protection panel includes a **database inspector** showing exactly what the server and cloud admin can see. |
 
@@ -155,7 +155,7 @@ Error contracts: `401 UNAUTHENTICATED` / `INVALID_TOKEN` / `SESSION_REVOKED`; `4
 - AES-256-GCM keys are generated per browser tab/persona and held in a module-level `CryptoKey`; they are never sent to the server.
 - Plaintext fields are encrypted before the `PUT /api/vault/pii` request. The server validates the envelope shape and writes it verbatim.
 - The landlord's confidential claim note uses the same field-encryption path; the server never sees the plaintext.
-- The raw ledger is checked by the automated tests: it contains ciphertext and no plaintext IBAN, account name or national ID.
+- The raw ledger is checked by the automated tests: it contains ciphertext and no plaintext IBAN or national/student ID. The encrypted account-name value exists only inside the ciphertext; public profile display names are separate.
 - **Known trade-off:** because the key is memory-only, a full page reload loses the ability to decrypt records written by the previous tab. The ciphertext remains; the owner can re-encrypt fresh demo fields. This is deliberate zero-knowledge behaviour, not a server-side recovery path.
 
 ![The owner decrypts locally while the database inspector shows only ciphertext](docs/encryption.png)
