@@ -1,6 +1,6 @@
 export type PersonaId = "minh" | "lan" | "tuan" | "bay";
 export type TenantId = "minh" | "lan" | "tuan";
-export type TideRole = "tenant_lead" | "tenant_member" | "landlord";
+export type TideRole = "tenant" | "lead_tenant" | "landlord" | "arbitrator";
 export type Accent = "emerald" | "violet" | "cyan" | "amber";
 
 export interface PersonaDefinition {
@@ -28,10 +28,54 @@ export interface SessionClaims {
   sub: string;
   name: string;
   role: TideRole;
+  realmRoles: TideRole[];
+  clientRoles: TideRole[];
   scope: string;
   iat: number;
   exp: number;
   jti: string;
+}
+
+export interface EncryptedField {
+  alg: "AES-GCM-256";
+  iv: string;
+  ciphertext: string;
+}
+
+export interface InspectorRecord {
+  sub: string;
+  personaId: PersonaId;
+  role: TideRole;
+  fingerprint: string;
+  keyType: string;
+  registeredAt: number;
+}
+
+export interface InspectorDeposit {
+  sub: string;
+  personaId: PersonaId;
+  amountCents: number;
+  at: number;
+  payoutRef: EncryptedField | null;
+}
+
+export interface InspectorPii {
+  sub: string;
+  personaId: PersonaId;
+  updatedAt: number;
+  fields: Record<string, EncryptedField>;
+}
+
+export interface InspectorSnapshot {
+  file: string;
+  fileBytes: number;
+  updatedAt: number;
+  realm: { kid: string; alg: string; issuer: string; privateKey: string };
+  users: InspectorRecord[];
+  deposits: InspectorDeposit[];
+  pii: InspectorPii[];
+  claimNote: EncryptedField | null;
+  sessions: { revoked: number; active: number };
 }
 
 export interface SessionInfo {
@@ -63,6 +107,8 @@ export interface Claim {
   filedAt: number;
   landlordSignature: string;
   landlordFingerprint: string;
+  /** Confidential note encrypted client-side before it reaches this server. */
+  confidentialNote?: EncryptedField | null;
   approvals: Partial<Record<TenantId, SignedApproval>>;
   status: ClaimStatus;
   settledAt?: number;

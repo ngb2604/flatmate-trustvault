@@ -16,7 +16,7 @@ export function PersonaSwitcher({
     <section className="mt-5" aria-label="Active persona">
       <div className="mb-2.5 flex items-center justify-between gap-3 px-0.5">
         <div className="flex items-center gap-2 text-[12px] font-medium text-slate-400">
-          <Users size={13} className="text-slate-500" />
+          <Users size={13} className="text-slate-400" />
           Switch active session
           <span className="hidden rounded-md bg-white/[0.05] px-1.5 py-0.5 font-mono text-[11px] text-slate-400 sm:inline">
             {personaById(activeId).role}

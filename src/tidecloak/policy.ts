@@ -47,7 +47,7 @@ export function permissionsFor(role: TideRole): RolePermissions {
   return {
     readVault: true,
     fileClaim: role === "landlord",
-    signClaim: role === "tenant_lead" || role === "tenant_member",
+    signClaim: role === "lead_tenant" || role === "tenant",
     moveFunds: false,
   };
 }

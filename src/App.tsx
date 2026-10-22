@@ -9,6 +9,7 @@ import { VaultPanel } from "./components/VaultPanel";
 import { SessionPolicyCard } from "./components/SessionPolicyCard";
 import { AttackSimulator } from "./components/AttackSimulator";
 import { SettlementPanel } from "./components/SettlementPanel";
+import { DataProtectionPanel } from "./components/DataProtectionPanel";
 import { ExecutionLog } from "./components/ExecutionLog";
 import { BootScreen } from "./components/BootScreen";
 import { money } from "./lib/format";
@@ -18,36 +19,32 @@ export default function App() {
   const autoSignedIn = useRef(false);
 
   useEffect(() => {
-    if (!vault.state || vault.signedIn || autoSignedIn.current) return;
+    if (!vault.connection || vault.signedIn || autoSignedIn.current) return;
     const requested = new URLSearchParams(window.location.search).get("as");
     if (!requested) return;
     const persona = PERSONAS.find((candidate) => candidate.id === requested);
     if (!persona) return;
     autoSignedIn.current = true;
     void vault.signIn(persona.id);
-  }, [vault.state, vault.signedIn, vault.signIn]);
+  }, [vault.connection, vault.signedIn, vault.signIn]);
 
-  if (vault.booting || !vault.state) {
+  if (vault.booting || !vault.connection) {
+    return <BootScreen message={vault.bootMessage} error={vault.bootError} />;
+  }
+
+  if (!vault.signedIn || !vault.state) {
     return (
-      <BootScreen
-        message={vault.bootMessage}
-        error={vault.bootError}
+      <SignInScreen
+        connection={vault.connection}
+        busy={vault.busy}
+        message={vault.authMessage}
+        realmMode={vault.realm?.loginMode ?? "demo"}
+        onSignIn={(id) => void vault.signIn(id)}
       />
     );
   }
 
   const { state } = vault;
-
-  if (!vault.signedIn || !vault.activeSession) {
-    return (
-      <SignInScreen
-        connection={state.connection}
-        busy={vault.busy}
-        message={vault.authMessage}
-        onSignIn={(id) => void vault.signIn(id)}
-      />
-    );
-  }
 
   const lockedCents =
     vault.status === "settled"
@@ -60,6 +57,9 @@ export default function App() {
     <div className="min-h-screen bg-[#05070b]">
       <Header
         connection={state.connection}
+        persona={vault.activePersona}
+        session={vault.activeSession ?? null}
+        onSignOut={vault.signOut}
         onReset={() => void vault.resetDemo()}
         busy={vault.busy}
       />
@@ -151,6 +151,20 @@ export default function App() {
           </div>
 
           <div className="lg:col-span-12">
+            <DataProtectionPanel
+              persona={vault.activePersona}
+              pii={vault.pii}
+              inspector={vault.inspector}
+              busy={vault.piiBusy}
+              error={vault.piiError}
+              claimNote={state.claim?.confidentialNote ?? null}
+              onSave={vault.saveProtectedFields}
+              onReveal={vault.revealProtectedFields}
+              onRefresh={() => void vault.refreshInspector()}
+            />
+          </div>
+
+          <div className="lg:col-span-12">
             <ExecutionLog log={state.log} />
           </div>
         </div>
@@ -162,7 +176,7 @@ export default function App() {
           </p>
           <p className="flex items-center gap-2">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400/70" />
-            Simulated funds only · real signatures in-browser
+            Server-verified sessions · field-level encrypted records
           </p>
         </footer>
       </main>

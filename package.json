@@ -5,25 +5,35 @@
   "type": "module",
   "description": "Zero-trust co-living deposit escrow powered by TideCloak Emergent Authority",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --port 3000",
-    "typecheck": "tsc --noEmit"
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "preview": "next start -p 3000",
+    "typecheck": "tsc --noEmit",
+    "check:flow": "node scripts/flow.mjs",
+    "check:auth": "node scripts/auth-check.mjs",
+    "check:api": "node scripts/api-check.mjs",
+    "check:pii": "node scripts/pii-check.mjs",
+    "check:claim-note": "node scripts/claim-note-check.mjs",
+    "shots": "node scripts/shots.mjs",
+    "record:demo": "node scripts/record-demo.mjs"
   },
   "dependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
     "@tidecloak/js": "^0.14.41",
+    "jose": "^6.2.13",
     "lucide-react": "^0.468.0",
+    "next": "^15.5.28",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.0.0",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@types/node": "^26.6.5",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^4.3.4",
     "playwright-core": "^1.64.1",
     "tailwindcss": "^4.0.0",
-    "typescript": "~5.7.2",
-    "vite": "^6.0.5"
+    "typescript": "~5.7.2"
   }
 }

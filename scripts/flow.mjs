@@ -24,7 +24,14 @@ await shot("home", { fullPage: true });
 
 // 1. Lead tenant unilateral withdrawal
 await page.click('[data-testid="attack-minh"]');
-await page.waitForTimeout(350);
+await page.waitForFunction(
+  () =>
+    document
+      .querySelector('[data-testid="attack-panel"]')
+      ?.textContent?.includes("403 Forbidden"),
+  { timeout: 20000 },
+);
+await page.waitForTimeout(500);
 await shot("blocked-withdraw", { fullPage: true });
 console.log(
   "console 1:",
@@ -33,22 +40,34 @@ console.log(
 
 // 2. Landlord force deduct
 await page.click('[data-testid="persona-bay"]');
-await page.waitForTimeout(450);
+await page.waitForSelector('[data-testid="claim-submit"]', { timeout: 15000 });
+await page.waitForTimeout(400);
 await page.click('[data-testid="attack-bay"]');
-await page.waitForTimeout(350);
+await page.waitForFunction(
+  () =>
+    document
+      .querySelector('[data-testid="attack-panel"]')
+      ?.textContent?.includes("403 Forbidden"),
+  { timeout: 20000 },
+);
+await page.waitForTimeout(500);
 await shot("blocked-deduct", { fullPage: true });
 
 // 3. File the $150 claim
 await page.click('[data-testid="claim-submit"]');
 await page.waitForSelector('[data-testid="sig-row-minh"]', { timeout: 10000 });
-await page.waitForTimeout(300);
+await page.waitForTimeout(600);
 await shot("claim-pending", { fullPage: true });
 
 // 4. Tenant 1 signs
 await page.click('[data-testid="persona-minh"]');
-await page.waitForTimeout(450);
+await page.waitForSelector('[data-testid="sign-minh"]', { timeout: 15000 });
 await page.click('[data-testid="sign-minh"]');
-await page.waitForTimeout(500);
+await page.waitForSelector('[data-testid="sign-minh"]', {
+  state: "detached",
+  timeout: 20000,
+});
+await page.waitForTimeout(600);
 await shot("claim-1of2", { fullPage: true });
 console.log(
   "progress:",
@@ -57,9 +76,9 @@ console.log(
 
 // 5. Tenant 2 signs -> emergent authority
 await page.click('[data-testid="persona-lan"]');
-await page.waitForTimeout(450);
+await page.waitForSelector('[data-testid="sign-lan"]', { timeout: 15000 });
 await page.click('[data-testid="sign-lan"]');
-await page.waitForSelector('[data-testid="authority-banner"]', { timeout: 10000 });
+await page.waitForSelector('[data-testid="authority-banner"]', { timeout: 20000 });
 await page.waitForTimeout(1200);
 await shot("settled", { fullPage: true });
 console.log(
@@ -72,9 +91,9 @@ console.log(
 // 6. Dispute scenario after reset
 await page.click('[data-testid="reset-demo"]');
 await page.waitForSelector('[data-testid="claim-dispute"]', { timeout: 10000 });
-await page.waitForTimeout(300);
+await page.waitForTimeout(600);
 await page.click('[data-testid="claim-dispute"]');
-await page.waitForSelector('[data-testid="dispute-banner"]', { timeout: 10000 });
+await page.waitForSelector('[data-testid="dispute-banner"]', { timeout: 25000 });
 await page.waitForTimeout(900);
 await shot("disputed", { fullPage: true });
 console.log(

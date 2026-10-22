@@ -142,7 +142,7 @@ export function AttackSimulator({
             <span
               className={cn(
                 "font-mono text-[11px]",
-                alert ? "text-red-400" : "text-slate-500",
+                alert ? "text-red-400" : "text-slate-400",
               )}
             >
               {alert ? "403 blocked" : "idle"}
@@ -152,25 +152,28 @@ export function AttackSimulator({
           <div className="min-h-[150px] px-3 pb-3 font-mono text-[12px] leading-[1.8]">
             {alert ? (
               <div key={alert.id} className="animate-shake space-y-0.5">
-                <div className="flex items-center gap-2 text-slate-500">
+                <div className="flex items-center gap-2 text-slate-400">
                   <span className="text-emerald-400/70">POST</span>
                   <span>/vault/release</span>
                   <span className="ml-auto">HTTP/1.1</span>
                 </div>
                 <div className="text-slate-400">
-                  <span className="text-slate-500">&gt; actor</span>{" "}
+                  <span className="text-slate-400">&gt; actor</span>{" "}
                   {alert.actor}
                 </div>
                 <div className="text-slate-400">
-                  <span className="text-slate-500">&gt; policy</span>{" "}
+                  <span className="text-slate-400">&gt; policy</span>{" "}
                   {alert.policy}
                 </div>
                 <div className="my-1.5 h-px bg-white/[0.06]" />
                 <div className="font-semibold text-red-300">
-                  &lt; 403 Forbidden · {alert.code}
+                  &lt; 403 Forbidden · TIDECLOAK_EMERGENT_AUTHORITY_MISSING
+                </div>
+                <div className="text-slate-400">
+                  &lt; policy_code {alert.code}
                 </div>
                 <div className="text-slate-300">{alert.detail}</div>
-                <div className="truncate text-slate-500">
+                <div className="truncate text-slate-400">
                   &lt; sig {shortSignature(alert.signature)}
                 </div>
                 <div className="text-emerald-400/80">

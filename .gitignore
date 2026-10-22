@@ -16,3 +16,4 @@ recordings
 artifacts/
 .taste-skill/
 data/
+*.tsbuildinfo

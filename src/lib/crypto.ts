@@ -6,6 +6,10 @@ export function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+export function base64ToBytes(value: string): Uint8Array {
+  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+}
+
 export function base64UrlFromBytes(bytes: Uint8Array): string {
   return bytesToBase64(bytes)
     .replace(/\+/g, "-")
@@ -148,4 +152,115 @@ export function shortHash(hash: string): string {
 
 export function shortSignature(signature: string): string {
   return `${signature.slice(0, 14)}…${signature.slice(-6)}`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Field-level data protection (client-side AES-256-GCM)               */
+/* ------------------------------------------------------------------ */
+
+export async function generateDataKey(): Promise<CryptoKey> {
+  return crypto.subtle.generateKey(
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+export async function encryptField(
+  key: CryptoKey,
+  plaintext: string,
+): Promise<{ alg: "AES-GCM-256"; iv: string; ciphertext: string }> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    encoder.encode(plaintext),
+  );
+  return {
+    alg: "AES-GCM-256",
+    iv: bytesToBase64(iv),
+    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
+  };
+}
+
+export async function decryptField(
+  key: CryptoKey,
+  field: { iv: string; ciphertext: string },
+): Promise<string> {
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: base64ToBytes(field.iv) },
+    key,
+    base64ToBytes(field.ciphertext),
+  );
+  return new TextDecoder().decode(plaintext);
+}
+
+/* ------------------------------------------------------------------ */
+/* Client-side JWT verification against the realm JWKS                 */
+/* ------------------------------------------------------------------ */
+
+export async function verifyJwtWithJwks(
+  token: string,
+  jwksUrl = "/api/auth/jwks",
+): Promise<boolean> {
+  try {
+    const [encodedHeader, encodedPayload, encodedSignature] = token.split(".");
+    if (!encodedHeader || !encodedPayload || !encodedSignature) return false;
+
+    const header = JSON.parse(
+      new TextDecoder().decode(bytesFromBase64Url(encodedHeader)),
+    ) as { alg?: string; kid?: string };
+    if (header.alg !== "ES256") return false;
+
+    const response = await fetch(jwksUrl, { cache: "no-store" });
+    if (!response.ok) return false;
+    const jwks = (await response.json()) as {
+      keys: Array<JsonWebKey & { kid?: string }>;
+    };
+    const jwk = jwks.keys.find((key) => !header.kid || key.kid === header.kid);
+    if (!jwk) return false;
+
+    const publicKey = await crypto.subtle.importKey(
+      "jwk",
+      jwk,
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      ["verify"],
+    );
+    const valid = await crypto.subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" },
+      publicKey,
+      bytesFromBase64Url(encodedSignature),
+      encoder.encode(`${encodedHeader}.${encodedPayload}`),
+    );
+    if (!valid) return false;
+
+    const payload = JSON.parse(
+      new TextDecoder().decode(bytesFromBase64Url(encodedPayload)),
+    ) as { exp?: number };
+    return typeof payload.exp === "number"
+      ? payload.exp > Math.floor(Date.now() / 1000)
+      : true;
+  } catch {
+    return false;
+  }
+}
+
+export function decodeJwt(token: string): {
+  header: Record<string, unknown> | null;
+  payload: Record<string, unknown> | null;
+} {
+  try {
+    const [header, payload] = token.split(".");
+    return {
+      header: JSON.parse(
+        new TextDecoder().decode(bytesFromBase64Url(header)),
+      ) as Record<string, unknown>,
+      payload: JSON.parse(
+        new TextDecoder().decode(bytesFromBase64Url(payload)),
+      ) as Record<string, unknown>,
+    };
+  } catch {
+    return { header: null, payload: null };
+  }
 }

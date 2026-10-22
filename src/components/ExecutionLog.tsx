@@ -133,7 +133,7 @@ export function ExecutionLog({ log }: { log: LogEntry[] }) {
                     {entry.detail}
                   </p>
 
-                  <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px] text-slate-500">
+                  <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px] text-slate-400">
                     <span className={style.actor}>{entry.actor}</span>
                     <span className="text-slate-600">/</span>
                     <span title={entry.hash} className="hover:text-slate-300">

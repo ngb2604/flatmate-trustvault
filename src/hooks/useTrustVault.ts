@@ -1,61 +1,67 @@
+"use client";
+
 import { useEffect, useRef, useState } from "react";
 import {
   DEFAULT_CLAIM_CENTS,
   DEFAULT_CLAIM_REASON,
   DEFAULT_EVIDENCE,
-  INITIAL_TOTAL_CENTS,
   PERSONAS,
   TENANT_IDS,
   personaById,
 } from "../data/personas";
 import {
-  base64UrlFromString,
+  decodeJwt,
+  decryptField,
+  encryptField,
+  generateDataKey,
   generateIdentity,
   sha256Hex,
-  shortSignature,
   signPayload,
-  signRaw,
-  verifyPayload,
-  verifyRaw,
-  type LocalIdentity,
+  verifyJwtWithJwks,
 } from "../lib/crypto";
-import { money, splitProRata } from "../lib/format";
-import {
-  RELEASE_POLICY,
-  consensusFrom,
-  forceDeductionBlocked,
-  permissionsFor,
-  unilateralWithdrawalBlocked,
-} from "../tidecloak/policy";
-import { connectTideCloak } from "../tidecloak/client";
+import { decisionPayload, fileClaimPayload } from "../lib/approval";
+import { consensusFrom, permissionsFor } from "../tidecloak/policy";
+import { connectTideCloak, type RealmInfo } from "../tidecloak/client";
 import type {
   AppState,
   AttackAlert,
   Claim,
   Decision,
+  EncryptedField,
+  InspectorSnapshot,
   LogEntry,
-  LogKind,
   PayoutLine,
-  PersonaDefinition,
   PersonaId,
   PersonaIdentity,
   SessionClaims,
   SessionInfo,
-  SignedApproval,
   TenantId,
+  TideRole,
+  VaultState,
 } from "../types";
 
-const ISSUER = "https://local.tidecloak.demo/realms/tide-demo";
-const GENESIS_HASH = "0".repeat(64);
-const SESSION_TTL_SECONDS = 15 * 60;
+interface RemoteState {
+  vault: VaultState;
+  wallets: Record<PersonaId, number>;
+  claim: Claim | null;
+  payouts: PayoutLine[];
+  log: LogEntry[];
+}
+
+interface PiiRecord {
+  updatedAt: number;
+  fields: Record<string, EncryptedField>;
+}
+
+interface ApiResult<T = Record<string, unknown>> {
+  ok: boolean;
+  status: number;
+  data: T;
+}
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/**
- * Commit to the evidence bytes, not just the filename. Falls back to hashing
- * the URL only when the browser cannot read the image (e.g. remote CORS).
- */
 async function hashEvidence(url: string): Promise<string> {
   try {
     const response = await fetch(url);
@@ -63,121 +69,43 @@ async function hashEvidence(url: string): Promise<string> {
       return await sha256Hex(await response.arrayBuffer());
     }
   } catch {
-    // The demo still records a commitment to the reference below.
+    // A commitment to the reference is still recorded below.
   }
   return await sha256Hex(`evidence-ref:${url}`);
 }
 
-async function mintSession(
-  issuer: LocalIdentity,
-  persona: PersonaDefinition,
-): Promise<SessionInfo> {
-  const issuedAt = Math.floor(Date.now() / 1000);
-  const header = {
-    alg: "ES256",
-    typ: "JWT",
-    kid: `tc_${issuer.fingerprint.slice(0, 12)}`,
+async function api<T = Record<string, unknown>>(
+  path: string,
+  token: string,
+  init: RequestInit = {},
+): Promise<ApiResult<T>> {
+  const headers: Record<string, string> = {
+    ...(init.body ? { "content-type": "application/json" } : {}),
   };
-  const payload = {
-    iss: ISSUER,
-    sub: `usr_${persona.id}_${crypto.randomUUID().slice(0, 8)}`,
-    preferred_username: persona.name,
-    realm_access: { roles: [persona.role] },
-    scope:
-      persona.kind === "landlord"
-        ? "openid tide.vault.read tide.claim.file"
-        : "openid tide.vault.read tide.claim.sign",
-    iat: issuedAt,
-    exp: issuedAt + SESSION_TTL_SECONDS,
-    jti: crypto.randomUUID(),
-  };
+  if (token) headers.authorization = `Bearer ${token}`;
 
-  const signingInput = `${base64UrlFromString(JSON.stringify(header))}.${base64UrlFromString(
-    JSON.stringify(payload),
-  )}`;
-  const signature = await signRaw(issuer.keys, signingInput);
-  const token = `${signingInput}.${signature}`;
-  const verified = await verifyRaw(
-    issuer.publicKey,
-    signingInput,
-    signature,
-  );
-
-  const claims: SessionClaims = {
-    iss: payload.iss,
-    sub: payload.sub,
-    name: persona.name,
-    role: persona.role,
-    scope: payload.scope,
-    iat: payload.iat,
-    exp: payload.exp,
-    jti: payload.jti,
-  };
-
-  return { personaId: persona.id, token, claims, verified };
-}
-
-function createInitialState(
-  connection: AppState["connection"],
-  sessions: Partial<Record<PersonaId, SessionInfo>>,
-  fingerprints: Record<PersonaId, string>,
-  activeId: PersonaId = "minh",
-): AppState {
-  return {
-    activeId,
-    vault: {
-      totalCents: INITIAL_TOTAL_CENTS,
-      frozenCents: 0,
-      initialTotalCents: INITIAL_TOTAL_CENTS,
-    },
-    wallets: { minh: 0, lan: 0, tuan: 0, bay: 0 },
-    claim: null,
-    payouts: [],
-    log: [],
-    alert: null,
-    sessions,
-    fingerprints,
-    connection,
-  };
-}
-
-async function appendLog(
-  base: AppState,
-  entry: Omit<LogEntry, "id" | "at" | "hash" | "prevHash">,
-): Promise<AppState> {
-  const prevHash = base.log[0]?.hash ?? GENESIS_HASH;
-  const at = Date.now();
-  const payload = { ...entry, at, prevHash };
-  const hash = await sha256Hex(`${prevHash}|${JSON.stringify(payload)}`);
-  const logEntry: LogEntry = {
-    ...payload,
-    id: `log_${crypto.randomUUID().slice(0, 8)}`,
-    hash,
-  };
-  return { ...base, log: [logEntry, ...base.log] };
-}
-
-async function seedLogs(base: AppState): Promise<AppState> {
-  let next = base;
-  next = await appendLog(next, {
-    kind: "vault" as LogKind,
-    actor: "VAULT",
-    title: "Escrow vault sealed · $1,200.00",
-    detail:
-      "Ownership ledger committed: Minh $400.00 · Lan $400.00 · Tuấn $400.00. No master key provisioned.",
-    amountCents: INITIAL_TOTAL_CENTS,
+  const response = await fetch(path, {
+    ...init,
+    headers,
+    cache: "no-store",
   });
-  next = await appendLog(next, {
-    kind: "session",
-    actor: "TIDECLOAK",
-    title: "Realm connected · 4 identities registered",
-    detail: `Realm ${base.connection.realm} · policy ${RELEASE_POLICY.id} armed. No session exists until a user signs in. Release requires landlord + 2/3 tenants.`,
-  });
-  return next;
+  const data = (await response.json().catch(() => ({}))) as T;
+  return { ok: response.ok, status: response.status, data };
+}
+
+function clearLegacyStorage() {
+  try {
+    // Sessions and PII must survive only in memory.
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+  } catch {
+    // Storage may be unavailable; memory-only is still enforced.
+  }
 }
 
 export function useTrustVault() {
   const [state, setState] = useState<AppState | null>(null);
+  const [realm, setRealm] = useState<RealmInfo | null>(null);
   const [booting, setBooting] = useState(true);
   const [bootMessage, setBootMessage] = useState(
     "Contacting TideCloak realm…",
@@ -186,59 +114,94 @@ export function useTrustVault() {
   const [busy, setBusy] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
   const [authMessage, setAuthMessage] = useState(
-    "Choose a TideCloak identity to mint a session.",
+    "Choose a demo identity to mint a session.",
   );
+  const [pii, setPii] = useState<PiiRecord | null>(null);
+  const [inspector, setInspector] = useState<InspectorSnapshot | null>(null);
+  const [piiBusy, setPiiBusy] = useState(false);
+  const [piiError, setPiiError] = useState<string | null>(null);
 
-  const stateRef = useRef<AppState | null>(null);
+  const realmRef = useRef<RealmInfo | null>(null);
+  const remoteRef = useRef<RemoteState | null>(null);
   const identitiesRef = useRef<Partial<Record<PersonaId, PersonaIdentity>>>({});
-  const issuerRef = useRef<LocalIdentity | null>(null);
+  const fingerprintsRef = useRef<Record<PersonaId, string>>({
+    minh: "",
+    lan: "",
+    tuan: "",
+    bay: "",
+  });
+  const sessionsRef = useRef<Partial<Record<PersonaId, SessionInfo>>>({});
+  const tokensRef = useRef<Partial<Record<PersonaId, string>>>({});
+  const piiKeysRef = useRef<Partial<Record<PersonaId, CryptoKey>>>({});
+  const piiRef = useRef<PiiRecord | null>(null);
+  const activeIdRef = useRef<PersonaId>("minh");
+  const alertRef = useRef<AttackAlert | null>(null);
   const busyRef = useRef(false);
+
+  const compose = (): AppState | null => {
+    const remote = remoteRef.current;
+    const info = realmRef.current;
+    if (!remote || !info) return null;
+    return {
+      activeId: activeIdRef.current,
+      vault: remote.vault,
+      wallets: remote.wallets,
+      claim: remote.claim,
+      payouts: remote.payouts,
+      log: remote.log,
+      alert: alertRef.current,
+      sessions: sessionsRef.current,
+      fingerprints: fingerprintsRef.current,
+      connection: info.connection,
+    };
+  };
+
+  const publish = () => {
+    const next = compose();
+    if (next) setState(next);
+  };
 
   useEffect(() => {
     let cancelled = false;
 
     const boot = async () => {
       try {
-        const connection = await connectTideCloak();
+        clearLegacyStorage();
+        const info = await connectTideCloak();
         if (cancelled) return;
+        realmRef.current = info;
+        setRealm(info);
 
         setBootMessage("Generating browser-held ECDSA P-256 keys…");
-        const issuer = await generateIdentity();
         const identities = {} as Record<PersonaId, PersonaIdentity>;
-        const sessions: Partial<Record<PersonaId, SessionInfo>> = {};
         const fingerprints = {} as Record<PersonaId, string>;
 
-        for (const persona of PERSONAS) {
-          const local = await generateIdentity();
-          identities[persona.id] = {
-            id: persona.id,
-            role: persona.role,
-            fingerprint: local.fingerprint,
-            publicKey: local.publicKey,
-            keys: local.keys,
-          };
-          fingerprints[persona.id] = local.fingerprint;
-        }
+        await Promise.all(
+          PERSONAS.map(async (persona) => {
+            const local = await generateIdentity();
+            identities[persona.id] = {
+              id: persona.id,
+              role: persona.role,
+              fingerprint: local.fingerprint,
+              publicKey: local.publicKey,
+              keys: local.keys,
+            };
+            fingerprints[persona.id] = local.fingerprint;
+          }),
+        );
 
         if (cancelled) return;
         identitiesRef.current = identities;
-        issuerRef.current = issuer;
-        setBootMessage("Sealing the escrow vault…");
-
-        let initial = createInitialState(connection, sessions, fingerprints);
-        initial = await seedLogs(initial);
-
-        await sleep(420);
+        fingerprintsRef.current = fingerprints;
+        setBootMessage("Opening the policy gateway…");
+        await sleep(300);
         if (cancelled) return;
-
-        stateRef.current = initial;
-        setState(initial);
         setBooting(false);
       } catch (error) {
         if (cancelled) return;
         console.error("[TrustVault] Boot failed", error);
         setBootError(
-          error instanceof Error ? error.message : "Unable to boot demo realm.",
+          error instanceof Error ? error.message : "Unable to reach the realm.",
         );
         setBooting(false);
       }
@@ -249,11 +212,6 @@ export function useTrustVault() {
       cancelled = true;
     };
   }, []);
-
-  const commit = (next: AppState) => {
-    stateRef.current = next;
-    setState(next);
-  };
 
   const runExclusive = async <T,>(fn: () => Promise<T>): Promise<T | undefined> => {
     if (busyRef.current) return undefined;
@@ -273,380 +231,205 @@ export function useTrustVault() {
     }
   };
 
-  const signIn = async (id: PersonaId) => {
+  const refreshState = async (token: string) => {
+    const response = await api<{ state: RemoteState }>("/api/vault/state", token);
+    if (response.ok) {
+      remoteRef.current = response.data.state;
+      publish();
+    }
+    return response;
+  };
+
+  const loadPii = async (token: string) => {
+    const response = await api<{ record: PiiRecord | null }>(
+      "/api/vault/pii",
+      token,
+    );
+    if (response.ok) {
+      piiRef.current = response.data.record;
+      setPii(response.data.record);
+    }
+  };
+
+  const refreshInspector = async (token?: string) => {
+    const activeToken = token ?? tokensRef.current[activeIdRef.current];
+    if (!activeToken) return;
+    const response = await api<{ inspector: InspectorSnapshot }>(
+      "/api/vault/inspector",
+      activeToken,
+    );
+    if (response.ok) setInspector(response.data.inspector);
+  };
+
+  const mintSession = async (id: PersonaId): Promise<SessionInfo> => {
+    const identity = identitiesRef.current[id];
+    if (!identity) throw new Error("Identity keys are still being generated.");
     const persona = personaById(id);
 
+    const response = await api<{
+      token: string;
+      claims: SessionClaims;
+      verified: boolean;
+      message?: string;
+    }>("/api/auth/token", "", {
+      method: "POST",
+      body: JSON.stringify({
+        personaId: id,
+        publicKeySpki: identity.publicKey,
+        fingerprint: identity.fingerprint,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        response.data.message ??
+          `The realm refused to issue a ${persona.role} session.`,
+      );
+    }
+
+    const verified = await verifyJwtWithJwks(response.data.token);
+    const session: SessionInfo = {
+      personaId: id,
+      token: response.data.token,
+      claims: response.data.claims,
+      verified,
+    };
+
+    sessionsRef.current[id] = session;
+    tokensRef.current[id] = response.data.token;
+    return session;
+  };
+
+  const ensureSession = async (id: PersonaId): Promise<SessionInfo> => {
+    const existing = sessionsRef.current[id];
+    if (existing && existing.claims.exp * 1000 > Date.now() + 5_000) {
+      return existing;
+    }
+    return mintSession(id);
+  };
+
+  const signIn = async (id: PersonaId) => {
     await runExclusive(async () => {
-      const current = stateRef.current;
-      const issuer = issuerRef.current;
-      if (!current || !issuer) return;
-      if (current.activeId === id && current.sessions[id]?.verified) return;
+      const persona = personaById(id);
+      setAuthMessage(`Requesting a ${persona.role} session from the realm…`);
 
-      setAuthMessage(`Minting a ${persona.role} session for ${persona.name}…`);
-      const rotated = Boolean(current.sessions[id]);
-      const session = await mintSession(issuer, persona);
+      // Every explicit sign-in rotates the token, even for the same identity.
+      const session = await mintSession(id);
+      activeIdRef.current = id;
+      const response = await api<{ state: RemoteState }>(
+        "/api/vault/state",
+        session.token,
+      );
+      if (!response.ok) {
+        throw new Error("The server rejected the new session.");
+      }
 
-      let next: AppState = {
-        ...current,
-        activeId: id,
-        sessions: { ...current.sessions, [id]: session },
-      };
+      remoteRef.current = response.data.state;
+      alertRef.current = null;
+      setState(compose());
 
-      next = await appendLog(next, {
-        kind: "session",
-        actor: `${persona.name} · ${persona.role}`,
-        title: rotated
-          ? "Session rotated · new ES256 token"
-          : `${persona.name} signed in · ES256 session`,
-        detail: `Scope ${session.claims.scope}. Private key non-extractable; token held in memory. ${session.verified ? "Signature verified in-browser." : "Signature verification failed."}`,
-        signature: session.token.split(".")[2],
-      });
+      // Load owner-only ciphertext and the server view before revealing the
+      // dashboard, so no request can race a fast sign-out.
+      await Promise.all([
+        loadPii(session.token),
+        refreshInspector(session.token),
+      ]);
 
-      await sleep(120);
-      commit(next);
       setSignedIn(true);
-      setAuthMessage("Choose a TideCloak identity to mint a session.");
+      setAuthMessage(`Signed in as ${persona.fullName}.`);
     });
   };
 
   const switchPersona = (id: PersonaId) => {
+    if (signedIn && activeIdRef.current === id) return;
+    if (busyRef.current) {
+      // Queue the switch behind the in-flight signature/deposit operation.
+      window.setTimeout(() => switchPersona(id), 150);
+      return;
+    }
     void signIn(id);
   };
 
   const signOut = () => {
-    const current = stateRef.current;
-    if (current) commit({ ...current, sessions: {} });
-    setSignedIn(false);
-    setAuthMessage("Signed out. Session tokens were cleared from memory.");
+    void runExclusive(async () => {
+      const activeToken = tokensRef.current[activeIdRef.current];
+      if (activeToken) {
+        await api("/api/auth/logout", activeToken, { method: "POST" });
+      }
+      sessionsRef.current = {};
+      tokensRef.current = {};
+      alertRef.current = null;
+      piiRef.current = null;
+      setPii(null);
+      setInspector(null);
+      setSignedIn(false);
+      setState(null);
+      setAuthMessage("Signed out. Session tokens were cleared from memory.");
+    });
   };
 
   const attemptUnilateralWithdrawal = async () => {
     await runExclusive(async () => {
-      const current = stateRef.current;
-      const identity = identitiesRef.current.minh;
-      if (!current || !identity || current.activeId !== "minh") return;
+      const current = remoteRef.current;
+      const id = activeIdRef.current;
+      const session = sessionsRef.current[id];
+      if (!current || !session || id !== "minh") return;
 
-      const at = Date.now();
-      const evaluation = unilateralWithdrawalBlocked();
-      const signature = await signPayload(identity.keys, {
-        v: 1,
-        intent: "vault.withdraw_all",
-        amountCents: current.vault.totalCents,
-        actor: "minh",
-        at,
-      });
-
-      const alert: AttackAlert = {
+      const response = await api<AttackAlert & { receipt: string }>(
+        "/api/vault/unilateral-attempt",
+        session.token,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            intent: "withdraw_all",
+            amountCents: current.vault.totalCents,
+          }),
+        },
+      );
+      const data = response.data;
+      alertRef.current = {
         id: `alert_${crypto.randomUUID().slice(0, 8)}`,
-        code: evaluation.code as AttackAlert["code"],
+        code: (data.code as AttackAlert["code"]) ?? "NO_MASTER_KEY",
         status: 403,
-        title: evaluation.title,
-        detail: evaluation.detail,
-        policy: evaluation.policy,
-        actor: "Minh · tenant_lead",
-        at,
-        signature,
+        title: data.title ?? "TIDECLOAK POLICY VIOLATION · 403",
+        detail: data.detail ?? "Unilateral withdrawal rejected.",
+        policy: data.policy ?? "tide.bond.release.v1",
+        actor: "Minh · lead_tenant",
+        at: data.at ?? Date.now(),
+        signature: data.receipt ?? "",
       };
-
-      let next: AppState = { ...current, alert };
-      next = await appendLog(next, {
-        kind: "blocked",
-        actor: "Minh · tenant_lead",
-        title: "Unilateral withdrawal blocked · 403",
-        detail: evaluation.detail,
-        amountCents: current.vault.totalCents,
-        signature,
-      });
-      commit(next);
+      await refreshState(session.token);
     });
   };
 
   const attemptForceDeduct = async () => {
     await runExclusive(async () => {
-      const current = stateRef.current;
-      const identity = identitiesRef.current.bay;
-      if (!current || !identity || current.activeId !== "bay") return;
+      const id = activeIdRef.current;
+      const session = sessionsRef.current[id];
+      if (!session || id !== "bay") return;
 
-      const at = Date.now();
-      const evaluation = forceDeductionBlocked();
-      const signature = await signPayload(identity.keys, {
-        v: 1,
-        intent: "vault.force_deduct",
-        amountCents: 30_000,
-        actor: "bay",
-        at,
-      });
-
-      const alert: AttackAlert = {
+      const response = await api<AttackAlert & { receipt: string }>(
+        "/api/vault/unilateral-attempt",
+        session.token,
+        {
+          method: "POST",
+          body: JSON.stringify({ intent: "force_deduct", amountCents: 30_000 }),
+        },
+      );
+      const data = response.data;
+      alertRef.current = {
         id: `alert_${crypto.randomUUID().slice(0, 8)}`,
-        code: evaluation.code as AttackAlert["code"],
+        code: (data.code as AttackAlert["code"]) ?? "MISSING_CONSENSUS",
         status: 403,
-        title: evaluation.title,
-        detail: evaluation.detail,
-        policy: evaluation.policy,
+        title: data.title ?? "TIDECLOAK POLICY VIOLATION · 403",
+        detail: data.detail ?? "Unilateral deduction rejected.",
+        policy: data.policy ?? "tide.bond.release.v1",
         actor: "Mr. Bảy · landlord",
-        at,
-        signature,
+        at: data.at ?? Date.now(),
+        signature: data.receipt ?? "",
       };
-
-      let next: AppState = { ...current, alert };
-      next = await appendLog(next, {
-        kind: "blocked",
-        actor: "Mr. Bảy · landlord",
-        title: "Unilateral deduction blocked · 403",
-        detail: evaluation.detail,
-        amountCents: 30_000,
-        signature,
-      });
-      commit(next);
+      await refreshState(session.token);
     });
-  };
-
-  const createClaimInternal = async (
-    base: AppState,
-    amountCents: number,
-    reason: string,
-    evidenceUrl: string,
-    evidenceName: string,
-  ): Promise<{ state: AppState; claim: Claim }> => {
-    const landlord = identitiesRef.current.bay;
-    if (!landlord) throw new Error("Landlord identity unavailable.");
-
-    const at = Date.now();
-    const claimId = `clm_${crypto.randomUUID().slice(0, 8)}`;
-    const evidenceHash = await hashEvidence(evidenceUrl);
-    const payload = {
-      v: 1,
-      policy: RELEASE_POLICY.id,
-      claimId,
-      amountCents,
-      decision: "file",
-      actor: "bay",
-      at,
-      evidenceHash,
-    };
-    const landlordSignature = await signPayload(landlord.keys, payload);
-    const verified = await verifyPayload(
-      landlord.publicKey,
-      payload,
-      landlordSignature,
-    );
-    if (!verified) throw new Error("Landlord claim signature failed verification.");
-
-    const claim: Claim = {
-      id: claimId,
-      amountCents,
-      reason,
-      evidenceUrl,
-      evidenceName,
-      evidenceHash,
-      filedAt: at,
-      landlordSignature,
-      landlordFingerprint: landlord.fingerprint,
-      approvals: {},
-      status: "pending",
-    };
-
-    let next: AppState = { ...base, claim };
-    next = await appendLog(next, {
-      kind: "claim",
-      actor: "Mr. Bảy · landlord",
-      title: `Deduction claim filed · ${money(amountCents)}`,
-      detail: `${reason} Evidence “${evidenceName}” attached; SHA-256 commitment 0x${evidenceHash.slice(0, 12)}… locked into the claim. 0 of 2 tenant signatures collected.`,
-      amountCents,
-      signature: landlordSignature,
-    });
-
-    return { state: next, claim };
-  };
-
-  async function settle(base: AppState, claim: Claim): Promise<AppState> {
-    const contributions: Record<string, number> = {};
-    for (const persona of PERSONAS) {
-      contributions[persona.id] = persona.contributionCents;
-    }
-
-    const refundPool = base.vault.totalCents - claim.amountCents;
-    const shares = splitProRata(refundPool, contributions, TENANT_IDS);
-
-    const wallets = {
-      ...base.wallets,
-      bay: base.wallets.bay + claim.amountCents,
-      minh: base.wallets.minh + shares.minh,
-      lan: base.wallets.lan + shares.lan,
-      tuan: base.wallets.tuan + shares.tuan,
-    };
-
-    const payouts: PayoutLine[] = [
-      ...TENANT_IDS.map((id) => ({
-        personaId: id,
-        amountCents: shares[id],
-        label: "Direct bond refund",
-        kind: "refund" as const,
-      })),
-      {
-        personaId: "bay" as PersonaId,
-        amountCents: claim.amountCents,
-        label: "Repair compensation",
-        kind: "compensation" as const,
-      },
-    ];
-
-    let next: AppState = {
-      ...base,
-      claim: {
-        ...claim,
-        status: "settled",
-        resolution: "consensus",
-        settledAt: Date.now(),
-      },
-      wallets,
-      vault: { ...base.vault, totalCents: 0, frozenCents: 0 },
-      payouts,
-    };
-
-    next = await appendLog(next, {
-      kind: "authority",
-      actor: "TIDECLOAK",
-      title: "Emergent Authority unlocked",
-      detail: `Policy ${RELEASE_POLICY.id} satisfied: landlord signature + 2/3 tenant approvals. One-time authority granted for ${claim.id}, then dissolved.`,
-      amountCents: claim.amountCents,
-    });
-
-    next = await appendLog(next, {
-      kind: "payout",
-      actor: "VAULT",
-      title: "Atomic settlement · 4 wallets credited",
-      detail: `${money(claim.amountCents)} to Mr. Bảy · ${money(shares.minh)} each to Minh, Lan and Tuấn. Refund never passed through the lead tenant.`,
-      amountCents: base.vault.totalCents,
-    });
-
-    return next;
-  }
-
-  async function dispute(
-    base: AppState,
-    claim: Claim,
-    _trigger: "tenant-rejection" | "demo",
-  ): Promise<AppState> {
-    const contributions: Record<string, number> = {};
-    for (const persona of PERSONAS) {
-      contributions[persona.id] = persona.contributionCents;
-    }
-
-    const refundPool = base.vault.totalCents - claim.amountCents;
-    const shares = splitProRata(refundPool, contributions, TENANT_IDS);
-
-    const wallets = {
-      ...base.wallets,
-      minh: base.wallets.minh + shares.minh,
-      lan: base.wallets.lan + shares.lan,
-      tuan: base.wallets.tuan + shares.tuan,
-    };
-
-    const payouts: PayoutLine[] = TENANT_IDS.map((id) => ({
-      personaId: id,
-      amountCents: shares[id],
-      label: "Undisputed refund",
-      kind: "refund" as const,
-    }));
-
-    let next: AppState = {
-      ...base,
-      claim: {
-        ...claim,
-        status: "disputed",
-        resolution: "dispute",
-        settledAt: Date.now(),
-      },
-      wallets,
-      vault: {
-        ...base.vault,
-        totalCents: claim.amountCents,
-        frozenCents: claim.amountCents,
-      },
-      payouts,
-    };
-
-    next = await appendLog(next, {
-      kind: "dispute",
-      actor: "TIDECLOAK",
-      title: "Dispute lock engaged · partial freeze",
-      detail: `Tenant rejection threshold reached. ${money(refundPool)} refunded immediately to the three contributors; only the disputed ${money(claim.amountCents)} stays locked for ${RELEASE_POLICY.arbitration}.`,
-      amountCents: claim.amountCents,
-    });
-
-    next = await appendLog(next, {
-      kind: "payout",
-      actor: "VAULT",
-      title: "Undisputed refund executed · 3 wallets credited",
-      detail: `${money(shares.minh)} each returned directly to Minh, Lan and Tuấn. The landlord's wallet received $0.00.`,
-      amountCents: refundPool,
-    });
-
-    return next;
-  }
-
-  const addTenantDecision = async (
-    base: AppState,
-    tenantId: TenantId,
-    decision: Decision,
-  ): Promise<AppState> => {
-    const claim = base.claim;
-    if (!claim || claim.status !== "pending") return base;
-    if (claim.approvals[tenantId]) return base;
-
-    const identity = identitiesRef.current[tenantId];
-    const persona = personaById(tenantId);
-    if (!identity) return base;
-
-    const at = Date.now();
-    const payload = {
-      v: 1,
-      policy: RELEASE_POLICY.id,
-      claimId: claim.id,
-      amountCents: claim.amountCents,
-      decision,
-      tenant: tenantId,
-      at,
-    };
-    const signature = await signPayload(identity.keys, payload);
-    const verified = await verifyPayload(identity.publicKey, payload, signature);
-    if (!verified) throw new Error("Tenant signature failed verification.");
-
-    const approval: SignedApproval = {
-      tenantId,
-      decision,
-      signature,
-      fingerprint: identity.fingerprint,
-      signedAt: at,
-      verified,
-    };
-
-    const nextClaim: Claim = {
-      ...claim,
-      approvals: { ...claim.approvals, [tenantId]: approval },
-    };
-    const consensus = consensusFrom(nextClaim.approvals);
-
-    let next: AppState = { ...base, claim: nextClaim };
-    const approved = decision === "approve";
-
-    next = await appendLog(next, {
-      kind: "sign",
-      actor: `${persona.name} · ${persona.roleLabel}`,
-      title: approved
-        ? `Tenant signature collected · ${money(claim.amountCents)} claim`
-        : `Tenant rejected claim · ${money(claim.amountCents)}`,
-      detail: approved
-        ? `${persona.name} co-signed with ES256 (${shortSignature(signature)}). ${consensus.approvals} of 2 required approvals collected; ${consensus.remaining} still needed.`
-        : `${persona.name} rejected the deduction. ${consensus.rejections} of 2 rejection locks engaged.`,
-      signature,
-    });
-
-    if (consensus.thresholdMet) return settle(next, nextClaim);
-    if (consensus.rejectionLock) return dispute(next, nextClaim, "tenant-rejection");
-    return next;
   };
 
   const fileClaim = async (
@@ -654,15 +437,20 @@ export function useTrustVault() {
     reason: string,
     evidenceUrl: string,
     evidenceName: string,
+    confidentialNote?: string,
   ): Promise<{ ok: boolean; error?: string }> => {
     if (busyRef.current) {
       return { ok: false, error: "Another TideCloak operation is in flight." };
     }
 
-    const current = stateRef.current;
-    if (!current) return { ok: false, error: "Vault not ready." };
-    const activeRole = personaById(current.activeId).role;
-    if (!permissionsFor(activeRole).fileClaim) {
+    const current = remoteRef.current;
+    const id = activeIdRef.current;
+    const session = sessionsRef.current[id];
+    const identity = identitiesRef.current[id];
+    if (!current || !session || !identity) {
+      return { ok: false, error: "Vault not ready." };
+    }
+    if (!permissionsFor(personaById(id).role).fileClaim) {
       return {
         ok: false,
         error: "Access denied: this session's role cannot file a claim.",
@@ -684,23 +472,54 @@ export function useTrustVault() {
     }
 
     const outcome = await runExclusive(async () => {
-      const latest = stateRef.current;
-      if (!latest) return false;
-      const created = await createClaimInternal(
-        latest,
-        amount,
-        reason.trim() || DEFAULT_CLAIM_REASON,
-        evidenceUrl,
-        evidenceName,
-      );
-      commit(created.state);
+      const evidenceHash = await hashEvidence(evidenceUrl);
+      const claimId = `clm_${crypto.randomUUID().slice(0, 8)}`;
+      const at = Date.now();
+      const payload = fileClaimPayload(claimId, amount, at, evidenceHash, id);
+      const signature = await signPayload(identity.keys, payload);
+
+      let note: EncryptedField | null = null;
+      if (confidentialNote?.trim()) {
+        const key =
+          piiKeysRef.current[id] ?? (await generateDataKey());
+        piiKeysRef.current[id] = key;
+        note = await encryptField(key, confidentialNote.trim());
+      }
+
+      const response = await api<{
+        state?: RemoteState;
+        message?: string;
+      }>("/api/vault/claims", session.token, {
+        method: "POST",
+        body: JSON.stringify({
+          claimId,
+          amountCents: amount,
+          reason: reason.trim() || DEFAULT_CLAIM_REASON,
+          evidenceUrl,
+          evidenceName,
+          evidenceHash,
+          at,
+          signature,
+          confidentialNote: note,
+        }),
+      });
+
+      if (!response.ok) return response.data.message ?? "Claim rejected.";
+      if (response.data.state) {
+        remoteRef.current = response.data.state;
+        publish();
+      }
+      await refreshInspector(session.token);
       return true;
     });
 
     if (outcome !== true) {
       return {
         ok: false,
-        error: "TideCloak rejected the claim request. Check the audit log.",
+        error:
+          typeof outcome === "string"
+            ? outcome
+            : "TideCloak rejected the claim request. Check the audit log.",
       };
     }
     return { ok: true };
@@ -708,91 +527,226 @@ export function useTrustVault() {
 
   const signClaim = async (decision: Decision) => {
     await runExclusive(async () => {
-      const current = stateRef.current;
-      if (!current?.claim || current.claim.status !== "pending") return;
-      if (!permissionsFor(personaById(current.activeId).role).signClaim) return;
-      const tenantId = current.activeId as TenantId;
+      const id = activeIdRef.current;
+      const session = sessionsRef.current[id];
+      const identity = identitiesRef.current[id];
+      const claim = remoteRef.current?.claim;
+      if (!session || !identity || !claim || claim.status !== "pending") return;
+      if (!permissionsFor(personaById(id).role).signClaim) return;
+      const tenantId = id as TenantId;
       if (!TENANT_IDS.includes(tenantId)) return;
-      if (current.claim.approvals[tenantId]) return;
+      if (claim.approvals[tenantId]) return;
 
-      const next = await addTenantDecision(current, tenantId, decision);
-      commit(next);
+      const signedAt = Date.now();
+      const payload = decisionPayload(
+        claim.id,
+        claim.amountCents,
+        tenantId,
+        decision,
+        signedAt,
+      );
+      const signature = await signPayload(identity.keys, payload);
+
+      const response = await api<{
+        state?: RemoteState;
+        message?: string;
+      }>(`/api/vault/claims/${encodeURIComponent(claim.id)}/decision`, session.token, {
+        method: "POST",
+        body: JSON.stringify({ decision, signature, signedAt }),
+      });
+
+      if (!response.ok) {
+        setBootError(response.data.message ?? "Signature rejected by the server.");
+        return;
+      }
+      if (response.data.state) {
+        remoteRef.current = response.data.state;
+        publish();
+      }
+      await refreshInspector(session.token);
     });
   };
 
   const runDisputeScenario = async () => {
     await runExclusive(async () => {
-      let current = stateRef.current;
-      if (!current) return;
+      const activeSession = sessionsRef.current[activeIdRef.current];
+      if (!activeSession) return;
 
-      if (!current.claim) {
-        const created = await createClaimInternal(
-          current,
+      const bayIdentity = identitiesRef.current.bay;
+      if (!bayIdentity) return;
+      const baySession = await ensureSession("bay");
+
+      if (!remoteRef.current?.claim) {
+        const evidenceHash = await hashEvidence(DEFAULT_EVIDENCE);
+        const claimId = `clm_${crypto.randomUUID().slice(0, 8)}`;
+        const at = Date.now();
+        const payload = fileClaimPayload(
+          claimId,
           DEFAULT_CLAIM_CENTS,
-          DEFAULT_CLAIM_REASON,
-          DEFAULT_EVIDENCE,
-          "broken_faucet.jpg",
+          at,
+          evidenceHash,
+          "bay",
         );
-        current = created.state;
+        const signature = await signPayload(bayIdentity.keys, payload);
+        const response = await api<{ state?: RemoteState; message?: string }>(
+          "/api/vault/claims",
+          baySession.token,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              claimId,
+              amountCents: DEFAULT_CLAIM_CENTS,
+              reason: DEFAULT_CLAIM_REASON,
+              evidenceUrl: DEFAULT_EVIDENCE,
+              evidenceName: "broken_faucet.jpg",
+              evidenceHash,
+              at,
+              signature,
+              confidentialNote: null,
+            }),
+          },
+        );
+        if (!response.ok || !response.data.state) return;
+        remoteRef.current = response.data.state;
       }
 
-      if (!current.claim || current.claim.status !== "pending") {
-        commit(current);
-        return;
+      for (const tenantId of ["lan", "tuan"] as TenantId[]) {
+        const claim: Claim | null = remoteRef.current?.claim ?? null;
+        if (!claim || claim.status !== "pending") break;
+        if (claim.approvals[tenantId]) continue;
+
+        const identity = identitiesRef.current[tenantId];
+        if (!identity) break;
+        const session = await ensureSession(tenantId);
+        const signedAt = Date.now();
+        const payload = decisionPayload(
+          claim.id,
+          claim.amountCents,
+          tenantId,
+          "reject",
+          signedAt,
+        );
+        const signature = await signPayload(identity.keys, payload);
+        const response: ApiResult<{ state?: RemoteState; message?: string }> =
+          await api<{ state?: RemoteState; message?: string }>(
+            `/api/vault/claims/${encodeURIComponent(claim.id)}/decision`,
+            session.token,
+            {
+              method: "POST",
+              body: JSON.stringify({ decision: "reject", signature, signedAt }),
+            },
+          );
+        if (!response.ok || !response.data.state) break;
+        remoteRef.current = response.data.state;
       }
 
-      const pendingClaim = current.claim;
-      const rejectionOrder: TenantId[] = ["lan", "tuan", "minh"];
-      const undecided = rejectionOrder.filter(
-        (id) => !pendingClaim.approvals[id],
-      );
-      for (const id of undecided.slice(0, 2)) {
-        current = await addTenantDecision(current, id, "reject");
-        if (current.claim?.status !== "pending") break;
-      }
-      commit(current);
+      publish();
+      await refreshInspector(activeSession.token);
     });
   };
 
   const resetDemo = async () => {
     await runExclusive(async () => {
-      const current = stateRef.current;
-      if (!current) return;
+      const session = sessionsRef.current[activeIdRef.current];
+      if (!session) return;
+      const response = await api<{ state: RemoteState }>("/api/vault/reset", session.token, {
+        method: "POST",
+      });
+      if (!response.ok) return;
+      remoteRef.current = response.data.state;
+      alertRef.current = null;
+      publish();
+      await Promise.all([
+        loadPii(session.token),
+        refreshInspector(session.token),
+      ]);
+    });
+  };
 
-      let sessions = current.sessions;
-      const issuer = issuerRef.current;
-      if (!sessions.minh && issuer) {
-        sessions = {
-          ...sessions,
-          minh: await mintSession(issuer, personaById("minh")),
-        };
+  const piiKeyFor = async (id: PersonaId): Promise<CryptoKey> => {
+    const existing = piiKeysRef.current[id];
+    if (existing) return existing;
+    const key = await generateDataKey();
+    piiKeysRef.current[id] = key;
+    return key;
+  };
+
+  const saveProtectedFields = async (
+    fields: Record<string, string>,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const id = activeIdRef.current;
+    const session = sessionsRef.current[id];
+    if (!session) return { ok: false, error: "Sign in first." };
+
+    const entries = Object.entries(fields).filter(([, value]) => value.trim());
+    if (entries.length === 0) {
+      return { ok: false, error: "Enter at least one value to protect." };
+    }
+
+    setPiiBusy(true);
+    setPiiError(null);
+    try {
+      const key = await piiKeyFor(id);
+      const encrypted: Record<string, EncryptedField> = {};
+      for (const [name, value] of entries) {
+        encrypted[name] = await encryptField(key, value.trim());
       }
 
-      let next = createInitialState(
-        current.connection,
-        sessions,
-        current.fingerprints,
-        "minh",
-      );
-
-      next = await appendLog(next, {
-        kind: "vault",
-        actor: "VAULT",
-        title: "Escrow vault re-sealed · $1,200.00",
-        detail:
-          "Ownership ledger restored: Minh $400.00 · Lan $400.00 · Tuấn $400.00. Wallets cleared. No master key provisioned.",
-        amountCents: INITIAL_TOTAL_CENTS,
+      const response = await api<{ message?: string }>("/api/vault/pii", session.token, {
+        method: "PUT",
+        body: JSON.stringify({ fields: encrypted }),
       });
-      next = await appendLog(next, {
-        kind: "reset",
-        actor: "ADMIN · demo",
-        title: "Demo state reset",
-        detail:
-          "New claim ID and fresh approval state. Session tokens preserved; private keys remain non-extractable in this tab.",
-      });
+      if (!response.ok) {
+        const message = response.data.message ?? "Encryption write failed.";
+        setPiiError(message);
+        return { ok: false, error: message };
+      }
 
-      commit(next);
-    });
+      await Promise.all([loadPii(session.token), refreshInspector(session.token)]);
+      return { ok: true };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Encryption failed.";
+      setPiiError(message);
+      return { ok: false, error: message };
+    } finally {
+      setPiiBusy(false);
+    }
+  };
+
+  const revealProtectedFields = async (): Promise<{
+    ok: boolean;
+    values?: Record<string, string>;
+    error?: string;
+  }> => {
+    const id = activeIdRef.current;
+    const session = sessionsRef.current[id];
+    if (!session) return { ok: false, error: "Sign in first." };
+    if (!piiRef.current) return { ok: false, error: "No protected fields stored." };
+
+    const key = piiKeysRef.current[id];
+    if (!key) {
+      return {
+        ok: false,
+        error:
+          "The decryption key lives only in the browser tab that created it. Sign in there to reveal these fields.",
+      };
+    }
+
+    try {
+      const values: Record<string, string> = {};
+      for (const [name, field] of Object.entries(piiRef.current.fields)) {
+        values[name] = await decryptField(key, field);
+      }
+      return { ok: true, values };
+    } catch {
+      return { ok: false, error: "Ciphertext could not be decrypted with this key." };
+    }
+  };
+
+  const decodeActiveToken = () => {
+    const token = tokensRef.current[activeIdRef.current];
+    return token ? decodeJwt(token) : { header: null, payload: null };
   };
 
   const activePersona = state ? personaById(state.activeId) : PERSONAS[0];
@@ -810,6 +764,8 @@ export function useTrustVault() {
 
   return {
     state,
+    realm,
+    connection: realm?.connection ?? null,
     booting,
     bootMessage,
     bootError,
@@ -831,6 +787,15 @@ export function useTrustVault() {
     signClaim,
     runDisputeScenario,
     resetDemo,
+    pii,
+    piiBusy,
+    piiError,
+    inspector,
+    saveProtectedFields,
+    revealProtectedFields,
+    refreshInspector,
+    decodeActiveToken,
+    roles: (activeSession?.claims.realmRoles ?? []) as TideRole[],
   };
 }
 

@@ -186,7 +186,7 @@ export function VaultPanel({
               <span className="label">Personal wallets</span>
             </div>
             <div className="flex items-center gap-1 text-[11px] text-slate-400">
-              <span>settled direct</span>
+              <span>direct settlement</span>
               <ArrowRight size={10} />
             </div>
           </div>
@@ -313,7 +313,7 @@ export function VaultPanel({
               </div>
             ))}
           </div>
-          <div className="mt-2 flex items-center justify-between px-0.5 font-mono text-[11px] text-slate-500">
+          <div className="mt-2 flex items-center justify-between px-0.5 font-mono text-[11px] text-slate-400">
             <span>vault_flat_7a · ownership ledger sealed</span>
             <span className="flex items-center gap-1">
               <ShieldCheck size={10} />

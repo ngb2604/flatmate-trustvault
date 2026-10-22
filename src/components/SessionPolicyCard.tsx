@@ -169,7 +169,7 @@ export function SessionPolicyCard({
             className="break-all px-3 pb-2 font-mono text-[11px] leading-[1.7] text-slate-400"
           >
             {activeSession.token.slice(0, 96)}
-            <span className="text-slate-500">…</span>
+            <span className="text-slate-400">…</span>
           </p>
           <div className="grid grid-cols-3 divide-x divide-white/[0.06] bg-white/[0.02]">
             <div className="px-2.5 py-2">
@@ -230,10 +230,13 @@ export function SessionPolicyCard({
           </div>
         </div>
 
-        <div className="mt-3 flex items-center gap-1.5 rounded-lg bg-white/[0.04] px-3 py-2 text-[11px] text-slate-400">
+        <div className="mt-3 flex min-w-0 items-center gap-1.5 rounded-lg bg-white/[0.04] px-3 py-2 text-[11px] text-slate-400">
           <Radio size={11} className="shrink-0 text-emerald-400/70" />
-          <span className="truncate">
-            {connection.issuer} · @tidecloak/js {connection.sdkVersion}
+          <span
+            className="min-w-0 flex-1 truncate"
+            title={`${connection.issuer} · @tidecloak/js ${connection.sdkVersion}`}
+          >
+            TideCloak SDK {connection.sdkVersion}
           </span>
           <LockKeyhole size={11} className="ml-auto shrink-0" />
         </div>

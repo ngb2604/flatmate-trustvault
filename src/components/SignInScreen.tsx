@@ -3,6 +3,7 @@ import {
   Fingerprint,
   KeyRound,
   LockKeyhole,
+  Server,
   ShieldCheck,
 } from "lucide-react";
 import { PERSONAS } from "../data/personas";
@@ -14,11 +15,13 @@ export function SignInScreen({
   connection,
   busy,
   message,
+  realmMode,
   onSignIn,
 }: {
   connection: ConnectionInfo;
   busy: boolean;
   message: string;
+  realmMode: "demo" | "live";
   onSignIn: (id: PersonaId) => void;
 }) {
   return (
@@ -56,8 +59,8 @@ export function SignInScreen({
               Sign in to the bond
             </h1>
             <p className="mt-3 max-w-[420px] text-[13px] leading-relaxed text-slate-300">
-              Four identities protect one $1,200 rental deposit. Choose an
-              identity to mint a role-bound ES256 session in this browser.
+              Four identities protect one $1,200 rental deposit. Sign in to
+              receive a server-verified ES256 session scoped to your role.
             </p>
 
             <div className="mt-6 space-y-3">
@@ -65,17 +68,20 @@ export function SignInScreen({
                 {
                   icon: KeyRound,
                   title: "Private keys never leave this tab",
-                  detail: "Non-extractable ECDSA P-256 keys via WebCrypto.",
+                  detail:
+                    "Non-extractable ECDSA P-256 keys sign every approval locally.",
+                },
+                {
+                  icon: Server,
+                  title: "Every API call is verified server-side",
+                  detail:
+                    "Bearer JWT signature, expiry and Realm Roles are checked before any write.",
                 },
                 {
                   icon: LockKeyhole,
-                  title: "Access is scoped to the role",
-                  detail: "Landlord files. Tenants co-sign. Nobody moves funds.",
-                },
-                {
-                  icon: Fingerprint,
-                  title: "A session is required",
-                  detail: "No vault action is accepted before sign-in.",
+                  title: "Sensitive records are ciphertext-only",
+                  detail:
+                    "Bank details and notes are AES-256-GCM encrypted in the browser.",
                 },
               ].map((item) => (
                 <div key={item.title} className="flex items-start gap-2.5">
@@ -96,13 +102,21 @@ export function SignInScreen({
             </div>
 
             <div className="mt-6 rounded-lg bg-[#10161f] p-3">
-              <div className="text-[11px] text-slate-400">Realm</div>
-              <div className="mt-1 flex items-center gap-1.5 text-[12px] text-slate-200">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                {connection.issuer}
-                <span className="ml-auto font-mono text-[11px] text-slate-400">
-                  @tidecloak/js {connection.sdkVersion}
+              <div className="flex items-center justify-between text-[11px] text-slate-400">
+                <span>Realm</span>
+                <span className="rounded bg-white/[0.05] px-1.5 py-0.5 font-mono text-[11px]">
+                  {realmMode === "live" ? "LIVE OIDC" : "DEMO IDP"}
                 </span>
+              </div>
+              <div className="mt-1 flex items-center gap-1.5 text-[12px] text-slate-200">
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" />
+                <span className="min-w-0 flex-1 break-all">
+                  {connection.issuer}
+                </span>
+              </div>
+              <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-400">
+                <span>TideCloak SDK {connection.sdkVersion}</span>
+                <span className="font-mono">{realmMode === "live" ? "OIDC" : "demo"}</span>
               </div>
               <p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">
                 {connection.note}
@@ -113,7 +127,9 @@ export function SignInScreen({
           <div className="border-t border-white/[0.06] p-4 sm:p-6 lg:border-l lg:border-t-0">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-[13px] font-semibold text-slate-100">
-                TideCloak identity provider
+                {realmMode === "live"
+                  ? "TideCloak identity provider"
+                  : "Demo identity provider"}
               </h2>
               <span className="font-mono text-[11px] text-slate-400">
                 4 identities
@@ -157,10 +173,45 @@ export function SignInScreen({
               })}
             </div>
 
+            <details
+              open
+              className="mt-3 rounded-lg bg-[#10161f] px-3 py-2"
+            >
+              <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[11px] text-slate-300">
+                <Fingerprint size={11} className="text-emerald-300/70" />
+                Judge quick-login credentials
+                <span className="ml-auto font-mono text-[11px] text-slate-400">
+                  demo realm
+                </span>
+              </summary>
+              <div className="mt-2 space-y-1 border-t border-white/[0.06] pt-2">
+                {PERSONAS.map((persona) => (
+                  <div
+                    key={persona.id}
+                    className="flex items-center justify-between font-mono text-[11px]"
+                  >
+                    <span className="text-slate-300">
+                      {persona.id}@trustvault.demo
+                    </span>
+                    <span className="text-slate-400">
+                      {realmMode === "demo" ? "no password" : "realm password"}
+                    </span>
+                  </div>
+                ))}
+                <p className="pt-1 text-[11px] leading-relaxed text-slate-400">
+                  Demo IdP: click an identity above. A live TideCloak realm uses
+                  the usernames and passwords provisioned in that realm.
+                </p>
+              </div>
+            </details>
+
             <div className="mt-3 flex items-start gap-1.5 text-[11px] leading-relaxed text-slate-400">
               <KeyRound size={12} className="mt-0.5 shrink-0" />
-              Demo realm: signatures are real; funds are simulated. A live
-              realm can be configured with VITE_TIDECLOAK_*.
+              {realmMode === "live"
+                ? "Registration, password policy and SSO are delegated to the live TideCloak realm."
+                : "The demo realm seeds four identities and issues server-signed sessions; a provisioned TideCloak realm can replace it for production SSO."}{" "}
+              This build verifies real ES256 JWTs on the server for every
+              request.
             </div>
 
             <p
@@ -177,10 +228,10 @@ export function SignInScreen({
         </div>
 
         <div className="mt-4 flex flex-col gap-1.5 text-[11px] text-slate-400 sm:flex-row sm:items-center sm:justify-between">
-          <p>No password. No master key. No funds move at sign-in.</p>
+          <p>No password stored. No master key. No funds move at sign-in.</p>
           <p className="flex items-center gap-1.5">
             <LockKeyhole size={11} />
-            Keys non-extractable · session memory only
+            Keys non-extractable · tokens memory only · PII ciphertext-only
           </p>
         </div>
       </div>

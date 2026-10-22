@@ -314,6 +314,7 @@ export function SettlementPanel({
     reason: string,
     evidenceUrl: string,
     evidenceName: string,
+    confidentialNote?: string,
   ) => Promise<{ ok: boolean; error?: string }>;
   onSign: (decision: Decision) => Promise<void>;
   onDispute: () => Promise<void>;
@@ -324,6 +325,9 @@ export function SettlementPanel({
   const [reason, setReason] = useState(DEFAULT_CLAIM_REASON);
   const [evidenceUrl, setEvidenceUrl] = useState(DEFAULT_EVIDENCE);
   const [evidenceName, setEvidenceName] = useState("broken_faucet.jpg");
+  const [confidentialNote, setConfidentialNote] = useState(
+    "Plumber invoice #F-2041 confirms the bathroom faucet was leaking before handover. Replacement quote: $150.00. Tenant Lan acknowledged the quote in the group chat on 18 Oct.",
+  );
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -354,6 +358,7 @@ export function SettlementPanel({
       reason.trim() || DEFAULT_CLAIM_REASON,
       evidenceUrl,
       evidenceName,
+      confidentialNote,
     );
     setSubmitting(false);
     if (!result.ok) setError(result.error ?? "Claim could not be filed.");
@@ -523,6 +528,27 @@ export function SettlementPanel({
                 </div>
               </div>
 
+              <details className="mt-3 rounded-lg bg-[#10161f] px-2.5 py-2">
+                <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[11px] text-slate-300">
+                  <ShieldCheck size={11} className="text-emerald-300/80" />
+                  Confidential evidence note
+                  <span className="ml-auto rounded bg-emerald-400/10 px-1.5 py-0.5 font-mono text-[11px] text-emerald-300">
+                    AES-256-GCM
+                  </span>
+                </summary>
+                <textarea
+                  rows={3}
+                  value={confidentialNote}
+                  onChange={(event) => setConfidentialNote(event.target.value)}
+                  className="mt-2 w-full resize-none rounded-md bg-[#020407] p-2.5 text-[12px] leading-relaxed text-slate-200 outline-none focus:ring-1 focus:ring-emerald-400/40"
+                  data-testid="claim-note"
+                />
+                <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+                  Encrypted in this browser before submission. The server stores
+                  only an ENC_TIDE_v1 ciphertext blob; other roles cannot read it.
+                </p>
+              </details>
+
               {error ? (
                 <p className="mt-2 flex items-start gap-1.5 rounded-lg bg-red-400/[0.08] px-2.5 py-2 text-[12px] leading-relaxed text-red-300">
                   <X size={12} className="mt-0.5 shrink-0" />
@@ -666,7 +692,7 @@ export function SettlementPanel({
                   <SignatureRow
                     key={tenantId}
                     persona={persona}
-                    roleLabel={persona.role === "tenant_lead" ? "lead" : "tenant"}
+                    roleLabel={persona.role === "lead_tenant" ? "lead" : "tenant"}
                     status={
                       approval
                         ? approval.decision === "approve"
